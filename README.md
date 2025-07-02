@@ -66,7 +66,7 @@ TARGET_AREA_INDEX = 1  # 0に変更すると南部の天気予報を取得
 ## ファイル構成
 
 ```
-滋賀の天気予報改善PJ/
+folder_name/
 ├── weather_forecast.py    # メインプログラム
 ├── weather_codes.py       # 天気コード辞書モジュール（100+種類）
 ├── requirements.txt       # 依存関係

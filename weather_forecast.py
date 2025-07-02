@@ -154,7 +154,6 @@ def get_weather_forecast():
         print(f"明日の降水確率: {rain_display}")
         print(f"明日の最低気温: {min_temp}℃")
         print(f"明日の最高気温: {max_temp}℃")
-        print(f"気温データ提供: {temp_area_name}")
 
     except requests.exceptions.RequestException as e:
         print(f"通信エラー: インターネット接続またはAPIの状態を確認してください。")
