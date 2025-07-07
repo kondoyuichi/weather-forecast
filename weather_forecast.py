@@ -1,8 +1,20 @@
 import requests
 import json
+import os
+import warnings
 from datetime import datetime, timedelta
-from weather_codes import get_weather_description
+from weather_codes import get_weather_description, get_weather_emoji
 import re
+from dotenv import load_dotenv
+
+# SSL警告を非表示にする（実際の通信には影響しない）
+warnings.filterwarnings('ignore', message='urllib3 v2 only supports OpenSSL 1.1.1+.*')
+
+# .envファイルから環境変数を読み込み
+load_dotenv()
+
+# Discord Webhook URL設定
+DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 
 # 滋賀県の天気予報API
 FORECAST_API_URL = "https://www.jma.go.jp/bosai/forecast/data/forecast/250000.json"
@@ -14,7 +26,55 @@ TARGET_AREA_INDEX = 1
 OBSERVATION_HTML_URL = "https://www.data.jma.go.jp/obd/stats/data/mdrr/synopday/data1s.html"
 
 # テスト用時刻設定（None=実際の時刻を使用、数値=指定時刻でテスト）
-TEST_HOUR = None  # 例: 16で17時前をテスト、18で17時後をテスト
+TEST_HOUR = None  # 例: 14で15時前をテスト、16で15時後をテスト
+
+# Discord通知機能
+def send_discord_notification(message):
+    """
+    Discord Webhookを使用してメッセージを送信する。
+    
+    Args:
+        message (str): 送信するメッセージ
+        
+    Returns:
+        bool: 送信成功時True、失敗時False
+    """
+    if not DISCORD_WEBHOOK_URL:
+        print("⚠️  Discord Webhook URLが設定されていません。")
+        return False
+    
+    try:
+        print("📩 Discord通知送信中...")
+        
+        # Discord Webhookに送信するデータ
+        data = {
+            "content": message,
+            "username": "滋賀県の天気予報"  # ボットの表示名
+        }
+        
+        response = requests.post(
+            DISCORD_WEBHOOK_URL,
+            json=data,
+            headers={'Content-Type': 'application/json'},
+            timeout=10
+        )
+        
+        if response.status_code == 204:
+            print("✅ Discord通知送信成功")
+            return True
+        else:
+            print(f"❌ Discord通知送信失敗: ステータスコード {response.status_code}")
+            print(f"レスポンス: {response.text}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Discord通知送信エラー: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Discord通知処理エラー: {e}")
+        return False
+
+
 
 # 天気予報データから指定日の天気情報を取得
 def get_weather_data(short_term_weather_series, target_date):
@@ -26,7 +86,7 @@ def get_weather_data(short_term_weather_series, target_date):
         target_date (datetime): 取得対象の日付
         
     Returns:
-        tuple: (地域名, 天気の文字列)
+        tuple: (地域名, 天気の文字列, 天気コード)
     """
 
     print(f"🔍 天気データ取得開始...")
@@ -51,7 +111,7 @@ def get_weather_data(short_term_weather_series, target_date):
     target_date_weather_code = selected_weather_area["weatherCodes"][target_date_index]
     target_date_weather = get_weather_description(target_date_weather_code)
     
-    return selected_area_name, target_date_weather
+    return selected_area_name, target_date_weather, target_date_weather_code
 
 # 降水確率データを取得
 def get_rain_data(rain_time_series, target_area_index, target_date):
@@ -188,10 +248,71 @@ def get_today_actual_temperature():
         print(f"⚠️  観測データ処理エラー: {e}")
         return None, None
 
-# 天気予報と今日の実績気温、前日比を取得して表示
-def get_weather_forecast_with_comparison():
 
+
+# Discord用メッセージフォーマット関数
+def format_discord_message(selected_area_name, publishing_office, formatted_report_time, 
+                          is_after_17, today_max_actual, today_min_actual,
+                          tomorrows_weather, target_date_rain_values, 
+                          tomorrow_max_forecast, tomorrow_min_forecast,
+                          max_diff_str, min_diff_str, weather_code):
+    """
+    天気予報データをDiscord用のメッセージにフォーマットする。
     
+    Args:
+        selected_area_name (str): 地域名
+        publishing_office (str): 発表元
+        formatted_report_time (str): 発表時刻
+        is_after_15 (bool): 15時以降かどうか
+        today_max_actual (float): 今日の実際の最高気温
+        today_min_actual (float): 今日の実際の最低気温
+        tomorrows_weather (str): 明日の天気
+        target_date_rain_values (list): 降水確率のリスト
+        tomorrow_max_forecast (float): 明日の予報最高気温
+        tomorrow_min_forecast (float): 明日の予報最低気温
+        max_diff_str (str): 最高気温の前日比
+        min_diff_str (str): 最低気温の前日比
+        weather_code (str): 天気コード
+        
+    Returns:
+        str: Discord用フォーマット済みメッセージ
+    """
+    # 明日の日付を取得
+    tomorrow_date = datetime.now() + timedelta(days=1)
+    date_str = f"{tomorrow_date.month}月{tomorrow_date.day}日"
+    
+    # 天気に合う絵文字を取得
+    weather_emoji = get_weather_emoji(weather_code)
+    weather_line = f"{weather_emoji} {tomorrows_weather}"
+    
+    # 降水確率を午前・午後のみに変更
+    # 通常、気象庁のデータは [0-6時, 6-12時, 12-18時, 18-24時] の順で提供される
+    rain_6to12 = ""
+    rain_12to18 = ""
+    
+    if len(target_date_rain_values) >= 3:
+        # 午前(6-12時)と午後(12-18時)を取得
+        rain_6to12 = target_date_rain_values[1]  # 6-12時
+        rain_12to18 = target_date_rain_values[2]  # 12-18時
+    else:
+        # データが不十分な場合は利用可能なデータを使用
+        print("⚠️ 降水確率データが不十分です。")
+    
+    # メッセージを新しいフォーマットで作成
+    message = f"""## {date_str}の天気予報（{selected_area_name}）
+- {weather_line}
+- 降水確率：{rain_6to12}% / {rain_12to18}%
+- 最高気温：{tomorrow_max_forecast}℃ (前日比{max_diff_str})
+- 最低気温：{tomorrow_min_forecast}℃ (前日比{min_diff_str})
+
+[気象庁の天気予報](<https://www.jma.go.jp/bosai/forecast/#area_type=offices&area_code=250000>)
+[おうみ発630の天気予報(平日のみ)](<https://www.nhk.jp/p/omi630/ts/8RG6LZ736N/list/>)"""
+    
+    return message
+
+# 天気予報と今日の実績気温、前日比を取得して表示
+def get_weather_forecast_with_comparison(send_to_discord=False):
+
     # 実行時刻をチェック（テスト用時刻が設定されている場合はそれを使用）
     current_time = datetime.now()
     test_hour = TEST_HOUR
@@ -203,13 +324,13 @@ def get_weather_forecast_with_comparison():
         print(f"🕐 実行時刻: {current_time.strftime('%H:%M')}")
         current_hour = current_time.hour
     
-    # 17時以降の実行かどうかを判定
-    is_after_17 = current_hour >= 17
+    # 15時以降の実行かどうかを判定
+    is_after_15 = current_hour >= 15
     
-    if is_after_17:
-        print("🌅 17時以降の実行です。当日の気温との比較を表示します。")
+    if is_after_15:
+        print("🌅 15時以降の実行です。当日の気温との比較を表示します。")
     else:
-        print("🌅 17時前の実行です。当日の気温との比較は表示しません。")
+        print("🌅 15時前の実行です。当日の気温との比較は表示しません。")
 
     tomorrow_date = datetime.now() + timedelta(days=1)
     
@@ -229,7 +350,7 @@ def get_weather_forecast_with_comparison():
         
         # 天気情報
         short_term_weather_series = short_term_forecast["timeSeries"][0]
-        selected_area_name1, tomorrows_weather = get_weather_data(short_term_weather_series, tomorrow_date)
+        selected_area_name1, tomorrows_weather, weather_code = get_weather_data(short_term_weather_series, tomorrow_date)
         print(f"✅ 天気データ取得成功: {selected_area_name1} - {tomorrows_weather}")
 
         # 降水確率
@@ -247,8 +368,8 @@ def get_weather_forecast_with_comparison():
         today_max_actual = None
         today_min_actual = None
 
-        # 17時以降の場合、当日の気温を取得し、明日の予報と前日比を計算する
-        if is_after_17:
+        # 15時以降の場合、当日の気温を取得し、明日の予報と前日比を計算する
+        if is_after_15:
             # 今日の実際の気温を取得
             today_max_actual, today_min_actual = get_today_actual_temperature()
             
@@ -269,7 +390,7 @@ def get_weather_forecast_with_comparison():
                 max_diff_str = format_diff(max_diff)
                 min_diff_str = format_diff(min_diff)
         else:
-            print("🌅 17時前の実行です。当日の気温との比較は表示しません。")
+            print("🌅 15時前の実行です。当日の気温との比較は表示しません。")
         
         # 結果表示
         print(f"\n" + "="*60)
@@ -280,14 +401,14 @@ def get_weather_forecast_with_comparison():
         print("")
         
         print("📊 今日の実際の気温（彦根）")
-        if is_after_17:
+        if is_after_15:
             if today_max_actual is not None and today_min_actual is not None:
                 print(f"   最高気温: {today_max_actual}℃")
                 print(f"   最低気温: {today_min_actual}℃")
             else:
                 print("   ⚠️  今日の実測データが取得できませんでした")
         else:
-            print("   ⚠️  17時前の実行のため、データなし")
+            print("   ⚠️  15時前の実行のため、データなし")
         print("")
         
         print("🔮 明日の天気予報")
@@ -299,6 +420,23 @@ def get_weather_forecast_with_comparison():
         print("")
         
         print(f"="*60)
+        
+        # Discord通知（オプション）
+        if send_to_discord:
+            print("\n📱 Discord通知を送信しています...")
+            discord_message = format_discord_message(
+                selected_area_name1, publishing_office, formatted_report_time,
+                is_after_15, today_max_actual, today_min_actual,
+                tomorrows_weather, target_date_rain_values,
+                tomorrow_max_forecast, tomorrow_min_forecast,
+                max_diff_str, min_diff_str, weather_code
+            )
+            
+            success = send_discord_notification(discord_message)
+            if success:
+                print("✅ Discord通知が正常に送信されました")
+            else:
+                print("❌ Discord通知の送信に失敗しました")
 
     except requests.exceptions.RequestException as e:
         print(f"❌ 通信エラー: インターネット接続またはAPIの状態を確認してください。")
@@ -315,5 +453,34 @@ def get_weather_forecast_with_comparison():
         print(f"❌ 予期せぬエラー: {type(e).__name__}: {e}")
         print(f"問題が続く場合は、プログラムの更新が必要かもしれません。")
 
+def show_usage():
+    """
+    使用方法を表示する関数
+    """
+    print("🔧 使用方法:")
+    print("1. コンソールにのみ表示: python3 weather_forecast.py")
+    print("2. Discord通知も送信: python3 weather_forecast.py --discord")
+    print("3. Discord通知テスト: python3 test_discord.py")
+    print("")
+    print("📋 Discord通知を使用する場合の設定:")
+    print("1. DiscordでWebhook URLを取得")
+    print("2. .envファイルにDISCORD_WEBHOOK_URL=あなたのWebhookURLを設定")
+    print("3. --discordオプションを付けて実行")
+
 if __name__ == "__main__":
-    get_weather_forecast_with_comparison() 
+    import sys
+    
+    # コマンドライン引数をチェック
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--discord":
+            # Discord通知あり
+            get_weather_forecast_with_comparison(send_to_discord=True)
+        elif sys.argv[1] == "--help" or sys.argv[1] == "-h":
+            # 使用方法を表示
+            show_usage()
+        else:
+            print("❌ 無効な引数です。")
+            show_usage()
+    else:
+        # Discord通知なし（デフォルト）
+        get_weather_forecast_with_comparison(send_to_discord=False) 
